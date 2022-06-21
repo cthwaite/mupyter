@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <style>
+html,
+body {
+    height: 100%;
+    width: 100%;
+    font: 1em sans-serif;
+}
+            #app {
+            }
+            .cell-col {
+                max-width: 800px;
+                margin: 2em auto;
+            }
+            .cell textarea {
+                font: 1em monospace;
+                resize: none;
+            }
+            .cell {
+                display: flex;
+                flex-direction: row;
+            }
+            .cell .label {
+                font: 1em monospace;
+                width: 10%;
+            }
+            .cell .container {
+                width: 90%;
+            }
+            .cell .response {
+                font: 1em monospace;
+            }
+            .cell .response .container.filled {
+                margin-bottom: 1em;
+            }
+            .error {
+                font: 1em monospace;
+            }
+            .error .head {
+                background-color: #ff7f7f;
+            }
+        </style>
+    </head>
+    <body>
+        <main id="app"></main>
+        <script>
+            function h() {
+                const sel = arguments[0];
+                const tag = sel.match(/^[^\.#]+/)[0].trim();
+                // WONTFIX: i should handle tag === '', but instead i'll just avoid
+                // doing that, ha ha
+                const e = document.createElement(tag);
+                let classes = sel.match(/\.[^\.#]+/g);
+                if (classes != null) {
+                    classes = classes.map((c) => c.slice(1));
+                    e.classList.add(...classes);
+                }
+                const id = sel.match(/\#[^\.#]+/g);
+                if (id !== null) {
+                    e.id = id[0];
+                }
+
+                const options = arguments[1];
+                if (options != null) {
+                    if (typeof options === 'object' && Object.getPrototypeOf(options) === Object.prototype) {
+                        Object.entries(options).forEach((pair) => {
+                            const [key, value] = pair;
+                            e.setAttribute(key, value);
+                        });
+                    } else {
+                        e.append(options);
+                    }
+                }
+                const children = Array.from(arguments).slice(2);
+                e.append(...children);
+                return e;
+            }
+
+            function EventHandler() {
+                this._regs = {};
+                this.emit = function(chan, body) {
+                    console.log(`Handling event ${chan} for`, body);
+                    this._regs[chan](body);
+                }
+                this.register = function(chan, fn) {
+                    console.log(`Creating event channel ${chan}`);
+                    this._regs[chan] = fn;
+                }
+            }
+            const e = new EventHandler();
+
+            function CellIncrement() {
+                this._index = 0;
+                this.getIndex = function() {
+                    ix = this._index;
+                    this._index += 1;
+                    return ix;
+                }
+                this.lastIndex = function() {
+                    return this._index - 1;
+                }
+            }
+            const cells = new CellIncrement();
+
+            function cell() {
+                const cellIndex = cells.getIndex();
+                const cont = h("div.container");
+                const rsp = h("div.response", h("div.container"));
+                const inp = h("textarea", { rows: 5, cols: 80 });
+                inp.addEventListener("keydown", function (evt) {
+                    if (evt.keyCode === 13 && (evt.shiftKey || evt.metaKey)) {
+                        evt.preventDefault();
+                        if (inp.value.trim() === "") {
+                            return;
+                        }
+                        inp.blur();
+                        e.emit('onSubmit', { code: inp.value, cellIndex });
+                    } else if (evt.keyCode == 9) {
+                        evt.preventDefault();
+                        const start = this.selectionStart;
+                        const end = this.selectionEnd;
+                        // set textarea value to: text before caret + soft-tab + text after caret
+                        this.value =
+                            this.value.substring(0, start) +
+                            "    " +
+                            this.value.substring(end);
+
+                        // put caret at right position again
+                        this.selectionStart = this.selectionEnd = start + 4;
+                    }
+                });
+                cont.append(inp, rsp);
+                const el = h(
+                    "div.cell",
+                    { "data-mupyter-cell-index": cellIndex },
+                    h("div.label", `[${cellIndex}]`),
+                    cont
+                );
+                return el;
+            }
+            const JSON_HEADERS = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            };
+            function submitCode(kernel, code) {
+                return fetch(`http://localhost:8000/kernels/${kernel}/process`,  {
+                    method: 'POST',
+                    headers: JSON_HEADERS,
+                    body: JSON.stringify({code}),
+                })
+            }
+            function deleteKernel(kernel) {
+                return fetch(
+                    `http://localhost:8000/kernels/${kernel}`,
+                    {
+                        method: 'DELETE',
+                        headers: JSON_HEADERS,
+                    }
+                ).then((r) => r.json())
+            }
+            function createError(data) {
+                const { type, msg } = data.error;
+                const out = data.output == null ? "" : data.output.join("\n");
+
+                return h(
+                    "div.error",
+                    h("div.head", `${type}: ${msg}`),
+                    h("div.body", out)
+                );
+            }
+
+            function getResponseContainer(cellIndex) {
+                return document.querySelector(
+                    `div[data-mupyter-cell-index="${cellIndex}"] `
+                    + 'div.response div.container'
+                );
+            }
+
+            function main(kernel) {
+                const key = kernel.key;
+                console.log("Using key", key);
+                window.addEventListener(
+                    "beforeunload",
+                    function (e) {
+                        e.preventDefault();
+                        deleteKernel(kernel);
+                        e.returnValue = '';
+                    },
+                    false
+                );
+                e.register('onSubmit', function({ code, cellIndex }) {
+                    submitCode(kernel.key, code).then(data => data.json()).then(response => {
+                        e.emit('onResponse', { response, cellIndex });
+                    });
+                });
+                e.register('onResponse', function({ response, cellIndex }) {
+                    console.log(response);
+                    const target = getResponseContainer(cellIndex);
+                    if (!response.ok) {
+                        console.error(response.error);
+                        target.appendChild(createError(response));
+                        return;
+                    }
+                    if (response.output !== null) {
+                        while (target.firstChild) {
+                            target.removeChild(target.firstChild);
+                        }
+                        const rsp = h("div.response", response.output.join(""));
+                        target.append(rsp);
+                        target.classList.add('filled');
+                    }
+                    if (cellIndex === cells.lastIndex()) {
+                        const newCell = cell();
+                        cellCol.appendChild(newCell);
+                        newCell.querySelector("textarea").focus();
+                    } else {
+                        document
+                            .querySelector(
+                                `div[data-mupyter-cell-index="${
+                                        cellIndex + 1
+                                    }"] textarea`
+                            )
+                            .focus();
+                    }
+                });
+                const root = document.getElementById("app");
+
+                const cellCol = h("div.cell-col", cell());
+                root.append(
+                    h("h1.title", { style: "text-align: center" }, "µpyter"),
+                    cellCol
+                );
+            }
+            (function () {
+                fetch("http://localhost:8000/kernels", { method: "PUT" })
+                    .then((r) => r.json())
+                    .then((j) => {
+                        console.log(j);
+                        main(j);
+                    });
+            })();
+        </script>
+    </body>
+</html>
